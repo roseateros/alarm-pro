@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, SafeAreaView } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, SafeAreaView, Alert, Vibration } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useFonts, Inter_400Regular, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
 import { SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
@@ -23,10 +23,10 @@ Notifications.setNotificationHandler({
 });
 
 export default function App() {
-  const [isLoading, setIsLoading] = useState(true);
   const [alarms, setAlarms] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [showAddAlarm, setShowAddAlarm] = useState(false);
-  const [expoPushToken, setExpoPushToken] = useState('');
+  const soundRef = useRef(null);
   const notificationListener = useRef();
   const responseListener = useRef();
 
@@ -63,31 +63,30 @@ export default function App() {
   }, [alarms]);
 
   const registerForPushNotificationsAsync = async () => {
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
-    let finalStatus = existingStatus;
-    
-    if (existingStatus !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
+    try {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      
+      if (finalStatus !== 'granted') {
+        alert('Failed to get push token for push notification!');
+        return;
+      }
+    } catch (error) {
+      console.error('Error registering for notifications:', error);
     }
-    
-    if (finalStatus !== 'granted') {
-      alert('Failed to get push token for push notification!');
-      return;
-    }
-    
-    const token = (await Notifications.getExpoPushTokenAsync()).data;
-    setExpoPushToken(token);
   };
 
   const setupNotificationListeners = () => {
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
-      // Handle received notification
       console.log('Notification received:', notification);
     });
 
     responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
-      // Handle notification response (when user taps notification)
       console.log('Notification response:', response);
     });
   };
@@ -141,80 +140,81 @@ export default function App() {
     });
   };
 
+  const stopAlarm = async () => {
+    try {
+      if (soundRef.current) {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      }
+      Vibration.cancel();
+    } catch (error) {
+      console.error('Error stopping alarm:', error);
+    }
+  };
+
   const triggerAlarm = async (alarm) => {
     try {
-      // Schedule a notification
+      // Stop any existing alarm
+      await stopAlarm();
+
+      // Play notification
       await Notifications.scheduleNotificationAsync({
         content: {
           title: '⏰ Wake Up!',
           body: `It's ${alarm.time}`,
           sound: 'default',
           priority: 'max',
-          vibrate: [0, 250, 250, 250],
         },
-        trigger: null, // Show immediately
+        trigger: null,
       });
+
+      // Start vibration
+      Vibration.vibrate([1000, 2000, 3000], true);
 
       // Play sound
       const { sound } = await Audio.Sound.createAsync(
         require('./assets/alarm-sound.mp3'),
-        { shouldPlay: true, isLooping: true }
+        { shouldPlay: true, isLooping: true, volume: 1.0 }
       );
+      
+      soundRef.current = sound;
 
-      // Keep playing for 1 minute or until stopped
-      setTimeout(async () => {
-        try {
-          await sound.stopAsync();
-          await sound.unloadAsync();
-        } catch (error) {
-          console.error('Error stopping sound:', error);
+      // Show stop alert
+      Alert.alert(
+        'Alarm!',
+        `It's ${alarm.time}`,
+        [
+          {
+            text: 'STOP',
+            onPress: stopAlarm,
+            style: 'destructive',
+          }
+        ],
+        { 
+          cancelable: false,
+          onDismiss: stopAlarm 
         }
-      }, 60000);
+      );
 
     } catch (error) {
       console.error('Error triggering alarm:', error);
     }
   };
 
-  const toggleAlarm = (alarmToToggle) => {
-    try {
-      // Safety check for undefined alarms
-      if (!alarms) {
-        console.log('Alarms is undefined, initializing...');
-        setAlarms([]);
-        return;
-      }
-
-      const updatedAlarms = alarms.map(alarm => {
-        if (alarm.time === alarmToToggle.time) {
-          return {
-            ...alarm,
-            enabled: !alarm.enabled
-          };
-        }
-        return alarm;
-      });
-
-      setAlarms(updatedAlarms);
-      saveAlarmsToStorage(updatedAlarms);
-    } catch (error) {
-      console.error('Error in toggleAlarm:', error);
-      // Recovery: reset to empty array if error occurs
-      setAlarms([]);
-    }
+  const toggleAlarm = async (alarmToToggle) => {
+    const updatedAlarms = alarms.map(alarm => 
+      alarm.time === alarmToToggle.time 
+        ? { ...alarm, enabled: !alarm.enabled }
+        : alarm
+    );
+    setAlarms(updatedAlarms);
   };
 
-  const saveAlarmsToStorage = async (alarmsToSave) => {
+  const saveAlarmsToStorage = async (alarmsToSave = alarms) => {
     try {
-      // Safety check for undefined alarmsToSave
-      if (!alarmsToSave) {
-        console.log('alarmsToSave is undefined, saving empty array');
-        await AsyncStorage.setItem('alarms', JSON.stringify([]));
-        return;
-      }
-
       const cleanAlarms = alarmsToSave.map(alarm => ({
-        time: alarm.time || '',
+        time: alarm.time,
         repeatDays: alarm.repeatDays || [],
         enabled: Boolean(alarm.enabled),
         alternateWeeks: Boolean(alarm.alternateWeeks),
@@ -225,62 +225,81 @@ export default function App() {
       await AsyncStorage.setItem('alarms', JSON.stringify(cleanAlarms));
       console.log('Alarms saved successfully:', cleanAlarms);
     } catch (error) {
-      console.error('Error in saveAlarmsToStorage:', error);
-      // Recovery: try to save empty array
-      try {
-        await AsyncStorage.setItem('alarms', JSON.stringify([]));
-      } catch (backupError) {
-        console.error('Backup save failed:', backupError);
-      }
+      console.error('Error saving alarms:', error);
+      alert('Failed to save alarms. Please try again.');
     }
   };
 
-  // Load saved alarms when app starts
+  // Load alarms immediately when app starts
   useEffect(() => {
-    loadSavedAlarms();
+    const loadAlarms = async () => {
+      try {
+        const savedAlarms = await AsyncStorage.getItem('@alarms');
+        if (savedAlarms !== null) {
+          setAlarms(JSON.parse(savedAlarms));
+          console.log('Loaded alarms:', JSON.parse(savedAlarms));
+        }
+      } catch (error) {
+        console.error('Error loading alarms:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadAlarms();
   }, []);
 
-  const loadSavedAlarms = async () => {
-    try {
-      const savedAlarms = await AsyncStorage.getItem('alarms');
-      if (savedAlarms) {
-        const parsedAlarms = JSON.parse(savedAlarms);
-        if (Array.isArray(parsedAlarms)) {
-          setAlarms(parsedAlarms);
-        } else {
-          console.log('Saved alarms is not an array, initializing empty array');
-          setAlarms([]);
-        }
-      } else {
-        console.log('No saved alarms found, initializing empty array');
-        setAlarms([]);
-      }
-    } catch (error) {
-      console.error('Error in loadSavedAlarms:', error);
-      setAlarms([]); // Recovery: set empty array
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleSaveAlarm = (newAlarm) => {
-    try {
-      // Safety check for undefined alarms
-      const currentAlarms = alarms || [];
-      const updatedAlarms = [...currentAlarms, newAlarm];
-      setAlarms(updatedAlarms);
-      saveAlarmsToStorage(updatedAlarms);
-      setShowAddAlarm(false);
-    } catch (error) {
-      console.error('Error in handleSaveAlarm:', error);
-      alert('Failed to save alarm. Please try again.');
-    }
-  };
-
-  // Add this to app.json to fix the architecture warning
+  // Save alarms whenever they change
   useEffect(() => {
-    console.log('Current alarms state:', alarms); // Debug log
+    const saveAlarms = async () => {
+      try {
+        await AsyncStorage.setItem('@alarms', JSON.stringify(alarms));
+        console.log('Saved alarms:', alarms);
+      } catch (error) {
+        console.error('Error saving alarms:', error);
+      }
+    };
+
+    if (!isLoading) {
+      saveAlarms();
+    }
+  }, [alarms, isLoading]);
+
+  const handleSaveAlarm = async (newAlarm) => {
+    setAlarms(prevAlarms => [...prevAlarms, newAlarm]);
+    setShowAddAlarm(false);
+  };
+
+  // Check alarms every minute
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = new Date();
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      const currentDay = now.toLocaleDateString('en-US', { weekday: 'long' });
+
+      alarms.forEach(alarm => {
+        if (!alarm.enabled) return;
+
+        const [alarmHour, alarmMinute] = alarm.time.split(':').map(Number);
+        
+        if (currentHour === alarmHour && 
+            currentMinute === alarmMinute && 
+            alarm.repeatDays.includes(currentDay)) {
+          triggerAlarm(alarm);
+        }
+      });
+    }, 60000);
+
+    return () => clearInterval(interval);
   }, [alarms]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopAlarm();
+    };
+  }, []);
 
   if (!fontsLoaded || isLoading) {
     return (
