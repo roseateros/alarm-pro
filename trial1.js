@@ -102,18 +102,7 @@ function main() {
 
 		}
 
-		function updateCamera() {
-
-			// update the light target's matrixWorld because it's needed by the helper
-			light.updateMatrixWorld();
-			light.target.updateMatrixWorld();
-			helper.update();
-			// update the light's shadow camera's projection matrix
-			light.shadow.camera.updateProjectionMatrix();
-			// and now update the camera helper we're using to show the light's shadow camera
-			cameraHelper.update();
-
-		}
+		
 
 		updateCamera();
 
